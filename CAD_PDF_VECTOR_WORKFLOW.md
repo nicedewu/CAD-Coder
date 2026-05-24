@@ -64,7 +64,7 @@ ZH: 此流程不将标注数字（例如 3300、4000、9000）换算为真实毫
 ## Typical Command / 常用命令
 
 ```powershell
-& 'C:\Users\bobo\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' .\autocad_pdf_direct_pipeline.py --pdf 'C:/Users/bobo/Desktop/C区2F-模型.pdf'
+& 'C:\Users\bobo\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' .\autocad_pdf_direct_pipeline.py --pdf 'C:/Users/bobo/Desktop/模型.pdf'
 cscript.exe //nologo .\run_codex_auto_direct_draw.vbs
 ```
 
