@@ -1,169 +1,148 @@
-# CAD-Coder
+# codex-pdf-cad
 
-[Paper](https://arxiv.org/abs/2505.14646) | [Dataset](https://github.com/anniedoris/GenCAD-Code) | Project Page (Coming soon!)
+PDF 矢量平面图到原生 AutoCAD 实体的自动化工作流。
 
-## Overview
-**CAD-Coder generates CAD code (CadQuery Python) given an image input! Our model is a fine-tuned, open-source vision-langauge foundation model.** 
+An automation workflow for converting vector PDF floor plans into native, editable AutoCAD entities.
 
-## Dataset
-To learn more about our GenCAD-Code dataset, consisting of 163k image-CadQuery Python script pairs, check out our corresponding [GenCAD-Code dataset repo](https://github.com/anniedoris/GenCAD-Code).
+## 项目实际解决的问题 | Problems Solved
 
-## Pre-Trained CAD-Coder
-Our trained CAD-Coder model can be found on huggingface [here](https://huggingface.co/CADCODER/CAD-Coder/tree/main)!
+### PDF 不是可编辑 CAD 实体 | PDF is not editable CAD geometry
 
-To run inference on the model and produce the test results shown in our paper, please refer to the Inference section.
+读取 PDF 中的矢量路径，在当前打开的 AutoCAD 图纸中直接生成原生 `LINE` 和安全的 `TEXT` 实体，不使用 PDF 底图、图片或外部参照替代 CAD 线稿。
 
-## Environment Setup
-For inference, you need to set up the llava AND cad_iou environments described below (all three).
+The workflow reads vector paths from the PDF and creates native `LINE` and safe `TEXT` entities in the active AutoCAD drawing. It does not use a PDF underlay, image, or external reference as the drawing result.
 
-For training, you just need the llava environment.
+### 坐标比例与图纸标注不一致 | PDF coordinates do not match drawing dimensions
 
-### llava Environment Setup
-1. Suggested llava environment setup steps per the llava repo.
-```
-conda create -n llava python=3.10 -y
-conda activate llava
-pip install --upgrade pip  # enable PEP 660 support
-pip install -e .
-pip install -e ".[train]"
-pip install datasets
-pip install peft==0.10.0
-pip install tensorboard
-```
+需要按毫米标定时，尺寸比例只从尺寸线计算：
 
-2. Install flash-attn
-```
-pip install flash-attn --no-build-isolation
-```
-Note: this did not work for me (although it is what is suggested in LLaVA setup steps). I instead had to download the relevant wheel file ```flash_attn-2.7.2.post1+cu12torch2.1cxx11abiFALSE-cp310-cp310-linux_x86_64.whl``` from [this](https://github.com/Dao-AILab/flash-attention/releases) website. Use the one relevant to your specific cuda/torch/architecture.
+1. 找到尺寸数字附近的尺寸线。
+2. 寻找与尺寸线垂直的两条最近尺寸界线。
+3. 计算尺寸线与两条尺寸界线交点之间的原始距离。
+4. 使用 `比例 = 标注值（mm） / 交点距离`。
+5. 至少读取 3 个不同跨度，并取一致结果的中位数作为全局比例。
 
-### cad_iou Environment Setup
-```
-conda create -n cad_iou python=3.10 -y
-conda activate cad_iou
-mamba install -c conda-forge cadquery
-pip install trimesh
-pip install plyfile
-pip install pandas
-pip install tqdm
-```
+Dimension calibration is based only on dimension geometry:
 
-Note: We've found it is better to keep the cad_iou environment separate from the llava environment, as there are some conflicting dependencies. TODO: resolve these conflicts and merge the two environments.
+1. Find the dimension line near the numeric label.
+2. Find the two nearest extension lines perpendicular to that dimension line.
+3. Measure the distance between the two dimension-line intersections.
+4. Use `scale = labelled millimetres / intersection distance`.
+5. Use at least three distinct spans and take the median of the consistent results.
 
-## Inference
-These inference instructions assume that you are testing on the 100 sample subset from GenCAD-Code.
+文字边界框、箭头端点、斜杠、文字笔画和墙线端点都不参与比例计算。同一个几何跨度不能重复计数；证据不足或比例不一致时，流程会在进入 AutoCAD 前停止，不会静默使用 `1.0`。
 
-1. With the llava conda environment activated, run the following command to generate model responses to the test set:
-```
-./scripts/v1_5/eval/test_gencadcode.sh "CADCODER/CAD-Coder" "cadquery_test_data_subset100"
-```
-This will output the model's responses to the test set in the ```inference/inference_results/model_name/cadquery_test_data_subset100/merge.jsonl``` file.
+Text bounding boxes, arrow endpoints, slash marks, text strokes, and wall endpoints are excluded from scale calculation. The same geometric span cannot be counted twice. The workflow stops before AutoCAD when evidence is insufficient or inconsistent; it never silently falls back to `1.0` in strict mode.
 
-2. Generate the CAD created by the model's CadQuery Python scripts. With the cad_iou environment activated, run the following:
-```
-python scripts/generate_model_cad.py --dataset_name cadquery_test_data_subset100 --model_tested CADCODER/CAD-Coder --code_language cadquery --pc_reps 3 --parallel
-```
-This will output model generated step files to the ```inference/inference_results/model_name/cadquery_test_data_subset100/model_step``` directory. Statistics on the validity of the model generated code and steps can be found in ```inference/inference_results/model_name/cadquery_test_data_subset100/cad_gen_results.txt```.
+### 图元太多时 AutoCAD 看起来无响应 | Large drawings appear to hang AutoCAD
 
-3. Run the IoU metric (still with cad_iou activated).
-```
-python scripts/compute_iou.py --model_path CADCoder/CAD-Coder --test_set_name cadquery_test_data_subset100
-```
-The IoU results can be found in ```inference/inference_results/model_name/cadquery_test_data_subset100/cad_iou_results.txt```.
+输出会拆成多个 AutoLISP 批次，由 Windows VBScript 等待上一批完成后再发送下一批，并写入进度和错误文件，避免一次性发送过长命令。
 
-Note: If instead of testing pre-trained CAD-Coder you want to test your own model, replace CADCODER/CAD-Coder in the above calls with a path to your own model
+Output is split into AutoLISP batches. A Windows VBScript runner waits for each batch to finish before submitting the next one and records progress and errors.
 
-TODO: Add capability/instructions for live chat with the model.
+### 重复路径造成线条重叠 | Duplicate paths create overlapping lines
 
-## Training CAD-Coder
+绘图副本只做完全重复线段去重，包括反向重复线段；原始几何保留给尺寸测量，因此清理不会改变标定依据。
 
-### Phase 1 Training
-1. Activate the [llava](#llava-environment-setup) conda environment:
+The drawing copy removes only exact duplicate segments, including reversed duplicates. Raw geometry remains available for dimension measurement, so cleanup does not alter calibration evidence.
 
-```
-conda activate llava
+## 技术路线 | Technology
+
+- `pypdf` 或 `PyPDF2`：读取页面、变换矩阵、矢量路径和文字对象。
+- `RapidOCR`：识别尺寸标注数字。
+- `PyMuPDF` 或 Poppler：渲染页面供 OCR 使用。
+- AutoLISP `entmake`：直接创建 AutoCAD `LINE` 和 `TEXT` 实体。
+- Windows VBScript + AutoCAD COM：连接当前活动图纸并进行分批调度。
+- Python `unittest`：验证尺寸交点、比例中位数、重复跨度保护和坐标缩放。
+
+- `pypdf` or `PyPDF2`: PDF pages, transformation matrices, vector paths, and text objects.
+- `RapidOCR`: numeric dimension recognition.
+- `PyMuPDF` or Poppler: page rendering for OCR.
+- AutoLISP `entmake`: direct creation of AutoCAD `LINE` and `TEXT` entities.
+- Windows VBScript + AutoCAD COM: connection to the active drawing and batch scheduling.
+- Python `unittest`: intersection measurement, median scaling, duplicate-span protection, and coordinate-scaling tests.
+
+当前流程没有使用 `pywin32`；AutoCAD 调度通过 Windows VBScript 和 COM 完成。
+
+The current workflow does not use `pywin32`; AutoCAD scheduling is handled through Windows VBScript and COM.
+
+## 快速使用 | Quick Start
+
+确保 AutoCAD 已打开，并且目标图纸是当前活动文档。
+
+Make sure AutoCAD is open and the target drawing is the active document.
+
+安装 OCR 到项目私有目录 | Install OCR into the project-private directory:
+
+```powershell
+py -3 -m pip install --target .vendor-ocr rapidocr_onnxruntime
 ```
 
-2. Identify a location that is good to store a large quantity of data (~30GB) and export its absolute path as an environment variable:
-```
-export CADCODER_DATA_ROOT = {/path_to_data_storage/goes_here}
-```
+按 PDF 矢量比例绘制，不进行毫米标定 | Draw using the PDF vector scale:
 
-3. Download the pre-training dataset. This is the same dataset that is used by LLaVA 1.5.
-```
-cd $CADCODER_DATA_ROOT
-mkdir llava_pretrain_data
-huggingface-cli download liuhaotian/LLaVA-Pretrain --repo-type=dataset --local-dir "${LLAVA_DATA_ROOT}/llava_pretrain_data"
-cd llava_pretrain_data
-unzip images.zip
+```powershell
+py -3 .\scripts\codex-cad\autocad_pdf_direct_pipeline.py `
+  --pdf "C:/path/to/plan.pdf" `
+  --out-dir ".\codex-cad-output" `
+  --chunk-size 500 `
+  --chunk-timeout 120
 ```
 
-4. Run the phase 1 training script:
-```
-./scripts/v1_5/phase1_cadcoder.sh {your_stage1_checkpoint_save_dir}
-```
+需要按图上尺寸数字标定时，增加 `--scale-from-dimension`：
 
-The phase1 trained model will be saved to {your_stage1_checkpoint_save_dir}. We used 4 H100 GPUs for this phase of training, and it took 4.5 hours. During training of the model, you can check that the training loss looks something like what we got (see below) by running the following command:
+For millimetre calibration from dimension labels, add `--scale-from-dimension`:
 
-```
-cd {your_stage1_checkpoint_save_dir}
-tensorboard --logdir=runs
-```
+```powershell
+py -3 .\scripts\codex-cad\autocad_pdf_direct_pipeline.py `
+  --pdf "C:/path/to/plan.pdf" `
+  --out-dir ".\codex-cad-output" `
+  --scale-from-dimension `
+  --chunk-size 500 `
+  --chunk-timeout 120
 
-![CAD-Coder Phase 1 Training](docs_images/pretrain_results.png)
-
-### Phase 2 Training
-
-1. Download phase 2 GenCAD-Code training data:
-```
-cd $CADCODER_DATA_ROOT
-mkdir cadcoder_train_data
-huggingface-cli download CADCoder/GenCAD-Code cadquery_train_data_4096.json --repo-type=dataset --local-dir "${CADCODER_DATA_ROOT}/cadcoder_train_data"
+cscript.exe //nologo .\codex-cad-output\run_codex_auto_direct_draw.vbs
 ```
 
-Download GenCAD images from [this link](https://drive.google.com/file/d/1znREwbNBIyODLXRHmfHy5ar_ENSIFjG5/view?usp=drive_link) and unzip them in the "${CADCODER_DATA_ROOT}/cadcoder_train_data" directory. Rename the unzipped "images" directory to "gencad_im".
+`--scale-from-dimension` 是严格模式，要求至少 3 个一致的尺寸跨度。`--ocr` 仍保留为兼容参数；严格尺寸模式会自动优先使用 OCR 读取标注数字。
 
-2. Run the phase 2 training script:
-```
-./scripts/v1_5/phase2_cadcoder.sh {your_stage1_checkpoint_save_dir} {your_final_checkpoint_save_dir}
-```
+`--scale-from-dimension` is strict mode and requires at least three consistent dimension spans. `--ocr` remains as a compatibility flag; strict dimension mode automatically prefers OCR for reading dimension labels.
 
-The final model will be saved to {your_final_checkpoint_save_dir}. We used 4 H100 GPUs for this phase of training, and it took 5.7 hours. During training of the model, you can check that the training loss looks something like what we got (see below) by running the following command:
+## 输出与验证 | Outputs and Validation
 
-```
-cd {your_final_checkpoint_save_dir}
-tensorboard --logdir=runs
-```
+流程会生成 AutoLISP 批次、VBScript runner、比例证据、图元统计和进度文件。生成结果是可独立编辑的 CAD 线实体，而不是 PDF 参照或图片。
 
-![CAD-Coder Phase 2 Training](docs_images/finetune_results.png)
+The workflow generates AutoLISP batches, a VBScript runner, scale evidence, entity statistics, and progress files. The result is independently editable CAD linework rather than a PDF reference or image.
 
+运行测试：
 
+Run the tests:
 
-## Release Todo List
-
-- [x] Release GenCADCode Dataset
-- [x] Release CAD-Coder and variants on HF
-- [x] Release Training Code
-
-## Cleanup Todo List
-
-- [ ] Steamline inference to one script call
-- [ ] Chat capability with model
-- [ ] Move training and inference data to HuggingFace datasets
-
-## Citation
-If you use our code, model, or dataset, please cite our paper!
-
-```
-@article{doris2025cad,
-  title={CAD-Coder: An Open-Source Vision-Language Model for Computer-Aided Design Code Generation},
-  author={Doris, Anna C and Alam, Md Ferdous and Nobari, Amin Heyrani and Ahmed, Faez},
-  journal={arXiv preprint arXiv:2505.14646},
-  year={2025}
-}
+```powershell
+py -3 -m unittest discover -s .\scripts\codex-cad -p "test_*.py" -v
 ```
 
-## Acknowledgements
-This repo is a fork of the [LLaVA repo](https://github.com/haotian-liu/LLaVA). We thank these authors for developing this model architecture and training strategy, which we have adapted for CAD-Coder.
+当前验证结果：9 项单元测试通过；测试覆盖尺寸线与尺寸界线交点、至少 3 个独立跨度、中位数比例、重复跨度保护和坐标缩放。
 
-The authors gratefully acknowledge MIT-IBM for their partial support of this work. This material is based upon work supported by the National Science Foundation Graduate Research Fellowship. Any opinion, findings, and conclusions or recommendations expressed in this material are those of the authors(s) and do not necessarily reflect the views of the National Science Foundation.
+Current validation: 9 unit tests pass, covering dimension-line intersections, three or more distinct spans, median scaling, duplicate-span protection, and coordinate scaling.
+
+更完整的中英文工作流记录见 [`scripts/codex-cad/README.md`](scripts/codex-cad/README.md)。
+
+See [`scripts/codex-cad/README.md`](scripts/codex-cad/README.md) for the full bilingual workflow record.
+
+## 输入限制 | Input Limitations
+
+- 输入需要包含可解析的 PDF 矢量路径；纯图片 PDF 不会自动还原成 CAD 墙线。
+- OCR 负责识别尺寸数字，不负责把栅格图片重建为完整平面图。
+- 默认只输出适合嵌入 AutoLISP 的 ASCII 文字；异常编码或中文文字可能被跳过，但矢量线段仍可生成。
+- 运行期间不要切换 AutoCAD 当前图纸，也不要同时启动第二个 runner。
+
+- The input must contain parseable PDF vector paths; a raster-only PDF is not automatically reconstructed as CAD walls.
+- OCR recognizes dimension numbers; it does not vectorize a complete raster floor plan.
+- By default, only ASCII text safe for AutoLISP is emitted. Font-encoded or Chinese text may be skipped while vector linework can still be generated.
+- Do not switch the active AutoCAD drawing or start a second runner while a run is in progress.
+
+## 许可证边界 | License Boundary
+
+仓库中仍保留部分上游 CAD-Coder/LLaVA 相关源码，因此根目录 `LICENSE` 保留其 Apache-2.0 法律文本。`scripts/codex-cad` 是本项目的 PDF 到 AutoCAD 工作流实现；使用、再发布或拆分仓库时，请同时遵守仓库中各部分代码适用的许可证和署名要求。
+
+This repository still contains upstream CAD-Coder/LLaVA-related source code, so the root `LICENSE` retains the applicable Apache-2.0 legal text. `scripts/codex-cad` contains this project’s PDF-to-AutoCAD workflow; when using, redistributing, or splitting the repository, follow the licenses and attribution requirements applicable to each part.
