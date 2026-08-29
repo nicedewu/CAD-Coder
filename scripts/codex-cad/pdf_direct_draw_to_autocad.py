@@ -81,10 +81,17 @@ def rotate_point_for_page(x, y, rotation, width, height):
     return x, y
 
 
-def parse_pdf(src: str | Path, apply_page_rotation: bool = True, return_metadata: bool = False):
+def parse_pdf(
+    src: str | Path,
+    apply_page_rotation: bool = True,
+    return_metadata: bool = False,
+    page_number: int = 1,
+):
     pdf_path = Path(src)
     reader = PdfReader(str(pdf_path))
-    page = reader.pages[0]
+    if page_number < 1 or page_number > len(reader.pages):
+        raise ValueError(f"page_number must be between 1 and {len(reader.pages)}, got {page_number}")
+    page = reader.pages[page_number - 1]
     rotation = page.get("/Rotate", 0) if apply_page_rotation else 0
     width = float(page.mediabox.width)
     height = float(page.mediabox.height)
@@ -100,6 +107,9 @@ def parse_pdf(src: str | Path, apply_page_rotation: bool = True, return_metadata
     font_size = 12.0
     entities = []
     texts = []
+    filled_path_bboxes = []
+    fill_color = None
+    stroke_color = None
 
     def operand_to_text(obj) -> str:
         try:
@@ -111,10 +121,16 @@ def parse_pdf(src: str | Path, apply_page_rotation: bool = True, return_metadata
             s = s[1:-1]
         return s.strip()
 
-    def flush_path(stroke=True):
+    def flush_path(stroke=True, fill=False):
         nonlocal path
         if stroke:
             entities.extend(path)
+        if fill and path:
+            points = [point for segment in path for point in segment]
+            if points:
+                xs = [point[0] for point in points]
+                ys = [point[1] for point in points]
+                filled_path_bboxes.append((min(xs), min(ys), max(xs), max(ys), fill_color))
         path = []
 
     for operands, op_raw in cs.operations:
@@ -122,11 +138,17 @@ def parse_pdf(src: str | Path, apply_page_rotation: bool = True, return_metadata
         nums = [float(x) if isinstance(x, (int, float)) else x for x in operands]
 
         if op == "q":
-            stack.append((ctm, cur, start, list(path), in_text, text_matrix, font_size))
+            stack.append((ctm, cur, start, list(path), in_text, text_matrix, font_size, fill_color, stroke_color))
         elif op == "Q":
-            ctm, cur, start, path, in_text, text_matrix, font_size = stack.pop()
+            ctm, cur, start, path, in_text, text_matrix, font_size, fill_color, stroke_color = stack.pop()
         elif op == "cm":
             ctm = mmul(ctm, tuple(nums))
+        elif op in ("rg", "sc", "scn"):
+            if len(nums) >= 3 and all(isinstance(value, (int, float)) for value in nums[:3]):
+                fill_color = tuple(float(value) for value in nums[:3])
+        elif op in ("RG", "SC", "SCN"):
+            if len(nums) >= 3 and all(isinstance(value, (int, float)) for value in nums[:3]):
+                stroke_color = tuple(float(value) for value in nums[:3])
         elif op == "m":
             cur = tpoint(ctm, nums[0], nums[1])
             start = cur
@@ -157,9 +179,9 @@ def parse_pdf(src: str | Path, apply_page_rotation: bool = True, return_metadata
         elif op in ("S", "s"):
             if op == "s" and cur is not None and start is not None:
                 path.append((cur, start))
-            flush_path(True)
+            flush_path(stroke=True)
         elif op in ("f", "f*", "n"):
-            flush_path(op.startswith("f"))
+            flush_path(stroke=False, fill=op in ("f", "f*"))
         elif op == "BT":
             in_text = True
             text_matrix = (1, 0, 0, 1, 0, 0)
@@ -205,12 +227,35 @@ def parse_pdf(src: str | Path, apply_page_rotation: bool = True, return_metadata
             (*rotate_point_for_page(x, y, rotation, width, height), text, h)
             for x, y, text, h in texts
         ]
+        rotated_filled_path_bboxes = []
+        for minx0, miny0, maxx0, maxy0, color in filled_path_bboxes:
+            corners = [
+                rotate_point_for_page(minx0, miny0, rotation, width, height),
+                rotate_point_for_page(minx0, maxy0, rotation, width, height),
+                rotate_point_for_page(maxx0, miny0, rotation, width, height),
+                rotate_point_for_page(maxx0, maxy0, rotation, width, height),
+            ]
+            rotated_filled_path_bboxes.append(
+                (min(x for x, _ in corners), min(y for _, y in corners), max(x for x, _ in corners), max(y for _, y in corners), color)
+            )
+        filled_path_bboxes = rotated_filled_path_bboxes
 
     all_pts = [p for line in entities for p in line] + [(x, y) for x, y, _, _ in texts]
+    if not all_pts:
+        all_pts = (
+            [(minx0, miny0) for minx0, miny0, _maxx0, _maxy0, _color in filled_path_bboxes]
+            + [(maxx0, maxy0) for _minx0, _miny0, maxx0, maxy0, _color in filled_path_bboxes]
+        )
+    if not all_pts:
+        raise ValueError(f"PDF page {page_number} has no drawable content")
     minx = min(x for x, _ in all_pts)
     miny = min(y for _, y in all_pts)
     norm_lines = [((a[0] - minx, a[1] - miny), (b[0] - minx, b[1] - miny)) for a, b in entities]
     norm_texts = [(x - minx, y - miny, text, h) for x, y, text, h in texts]
+    norm_filled_path_bboxes = [
+        (minx0 - minx, miny0 - miny, maxx0 - minx, maxy0 - miny, color)
+        for minx0, miny0, maxx0, maxy0, color in filled_path_bboxes
+    ]
     if return_metadata:
         metadata = {
             "minx": minx,
@@ -218,6 +263,9 @@ def parse_pdf(src: str | Path, apply_page_rotation: bool = True, return_metadata
             "width": width,
             "height": height,
             "rotation": int(rotation or 0) % 360,
+            "page_number": page_number,
+            "page_count": len(reader.pages),
+            "filled_path_bboxes": norm_filled_path_bboxes,
         }
         return norm_lines, norm_texts, metadata
     return norm_lines, norm_texts
@@ -268,10 +316,11 @@ def write_vbs(lines, texts, out_path: str | Path = DEFAULT_OUT):
 def main():
     parser = argparse.ArgumentParser(description="Parse a PDF vector plan and emit a direct AutoCAD VBS drawer.")
     parser.add_argument("--pdf", required=True, help="PDF path to parse")
+    parser.add_argument("--page", type=int, default=1, help="1-based PDF page number to parse")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="VBS output path")
     args = parser.parse_args()
 
-    lines, texts = parse_pdf(args.pdf)
+    lines, texts = parse_pdf(args.pdf, page_number=args.page)
     write_vbs(lines, texts, args.out)
     print(f"wrote {Path(args.out).resolve()}")
     print(f"lines={len(lines)} text={len(texts)}")

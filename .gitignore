@@ -3,6 +3,9 @@ __pycache__
 *.pyc
 *.egg-info
 dist
+.vendor/
+.vendor-ocr/
+codex-cad-output*/
 
 # Log
 *.log
